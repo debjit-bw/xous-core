@@ -48,6 +48,12 @@ pub enum AppKey {
     WriteError,
     Success,
     InternalError,
+    /// Claim app slots `start..start + len` for the calling process until the next boot.
+    /// Succeeds if the range is unclaimed (or already claimed by the caller); `AccessDenied`
+    /// if any of it is claimed by another process. Once claimed, `ReadRequest`/`Write` on
+    /// those slots from any other process return `AccessDenied`. Unclaimed slots behave as
+    /// before. Appended last so the existing variants keep their encoding.
+    Claim { guard: [u32; 4], start: usize, len: usize },
 }
 
 impl Default for AppKey {

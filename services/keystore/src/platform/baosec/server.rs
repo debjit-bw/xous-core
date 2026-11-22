@@ -31,6 +31,11 @@ pub fn keystore(sid: SID) -> ! {
 
     let mut msg_opt = None;
 
+    // App-slot claims for this boot: (slot range, owning PID). See `AppKey::Claim`. Kept in
+    // RAM only, so every boot starts unclaimed; the owner claims before untrusted input runs.
+    #[cfg(feature = "app-keys")]
+    let mut app_claims: Vec<(core::ops::Range<usize>, xous::PID)> = Vec::new();
+
     // allow preemption once the keystore has claimed locks on all its critical resources
     hal.set_preemption(true);
     loop {
@@ -165,11 +170,48 @@ pub fn keystore(sid: SID) -> ! {
             }
             #[cfg(feature = "app-keys")]
             Opcode::AppKeyOp => {
+                let sender_pid = msg.sender.pid();
                 if let Some(mem) = msg.body.memory_message_mut() {
                     let mut buffer = unsafe { Buffer::from_memory_message_mut(mem) };
                     // as_flat saves a copy step, but we have to deserialize some enums manually
                     let mut app_key = buffer.to_original::<AppKey, _>().unwrap();
+                    // a slot claimed by another process is off limits
+                    let foreign_claim = |claims: &[(core::ops::Range<usize>, xous::PID)], index: usize| {
+                        claims.iter().any(|(r, owner)| r.contains(&index) && Some(*owner) != sender_pid)
+                    };
                     match app_key {
+                        AppKey::Claim { guard, start, len } => {
+                            app_key = if guard != APPKEY_GUARD || len == 0 {
+                                AppKey::InternalError
+                            } else if let (Some(end), Some(pid)) = (start.checked_add(len), sender_pid) {
+                                let range = start..end;
+                                match app_claims.iter().find(|(r, _)| r.start < range.end && range.start < r.end) {
+                                    Some((r, owner)) if *owner == pid && *r == range => AppKey::Success,
+                                    Some((_, owner)) => {
+                                        log::warn!(
+                                            "app slots {:?}: claim by PID {} denied, held by PID {}",
+                                            range,
+                                            pid.get(),
+                                            owner.get()
+                                        );
+                                        AppKey::AccessDenied
+                                    }
+                                    None => {
+                                        log::info!("app slots {:?} claimed by PID {}", range, pid.get());
+                                        app_claims.push((range, pid));
+                                        AppKey::Success
+                                    }
+                                }
+                            } else {
+                                AppKey::AccessDenied
+                            };
+                        }
+                        AppKey::ReadRequest { index, .. } | AppKey::Write { index, .. }
+                            if foreign_claim(&app_claims, index) =>
+                        {
+                            log::warn!("app slot {}: access by {:?} denied (claimed)", index, sender_pid);
+                            app_key = AppKey::AccessDenied;
+                        }
                         AppKey::ReadRequest { guard, index } => {
                             if guard != APPKEY_GUARD {
                                 app_key = AppKey::InternalError;
