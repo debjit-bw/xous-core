@@ -19,6 +19,30 @@ pub fn early_audit() {
     }
 }
 
+/// Hash the signed part of the image whose signature block starts at `start`, like the
+/// "code only" hashes of boot0 and boot1. Prints "none" if there's no valid signature block
+/// there, and refuses lengths that would run past the end of RRAM storage.
+fn hash_image(start: usize, description: &str) {
+    let pk: &SignatureInFlash = unsafe { (start as *const SignatureInFlash).as_ref().unwrap() };
+    if pk.sealed_data.magic != bao1x_api::signatures::MAGIC_NUMBER {
+        crate::println!("{}: none", description);
+        return;
+    }
+    let signed_len = pk.sealed_data.signed_len as usize;
+    let end = utralib::HW_RERAM_MEM + bao1x_api::RRAM_STORAGE_LEN;
+    if signed_len < SIGBLOCK_LEN - UNSIGNED_LEN || start + UNSIGNED_LEN + signed_len > end {
+        crate::println!("{}: invalid length {}", description, signed_len);
+        return;
+    }
+    let used = unsafe {
+        core::slice::from_raw_parts(
+            (start + SIGBLOCK_LEN) as *const u8,
+            signed_len - (SIGBLOCK_LEN - UNSIGNED_LEN),
+        )
+    };
+    hash_region(used, description);
+}
+
 fn hash_region(region: &[u8], description: &str) {
     let mut hasher = Sha512::new();
     hasher.update(&region);
@@ -244,6 +268,13 @@ pub fn audit() {
     // only the portion that's strictly reproducible
     hash_region(boot1_used, "boot1 code only");
     report_toolchain(b1_pk, "boot1 baobit toolchain");
+
+    // The firmware after boot1: the same "code only" measurement, so a board can be compared
+    // with a reproducible build of the published source. The apps region is where the dabao
+    // keeps its detached apps image.
+    hash_image(bao1x_api::LOADER_START, "loader code only");
+    hash_image(bao1x_api::KERNEL_START, "kernel code only");
+    hash_image(bao1x_api::offsets::dabao::APP_RRAM_START, "apps code only");
 
     // detailed state checks
     let mut secure = true;

@@ -300,18 +300,18 @@ pub fn sign_image<P: AsRef<Path>>(
             // The third-party key goes into public key slot 0 and makes the counter-signature.
             // XOUS_THIRDPARTY_KEY names a real one (an ed25519 PKCS#8 PEM). Without it, the
             // published test key is used, which protects nothing.
-            let testing_pem = match std::env::var("XOUS_THIRDPARTY_KEY") {
+            let (testing_pem, real_thirdparty) = match std::env::var("XOUS_THIRDPARTY_KEY") {
                 Ok(path) if !path.is_empty() => {
                     if fake_pubkeys {
                         println!("Third-party key: {}", path);
                     }
-                    load_pem(&path)?
+                    (load_pem(&path)?, true)
                 }
                 _ => {
                     if fake_pubkeys {
                         println!("WARNING: third-party key is the published TEST key (set XOUS_THIRDPARTY_KEY)");
                     }
-                    pem::parse(TEST_KEY_PEM)?
+                    (pem::parse(TEST_KEY_PEM)?, false)
                 }
             };
 
@@ -422,6 +422,23 @@ pub fn sign_image<P: AsRef<Path>>(
                 // fill in a "real" key for key 0
                 header.sealed_data.pubkeys_pq[0].pk.copy_from_slice(&TEST_KEY_PQ_PUB); // however we need to have a correct pub key so we can sign it
                 header.sealed_data.pubkeys_pq[0].tag = *b"tpk0";
+
+                if real_thirdparty {
+                    // A real third-party image must be reproducible, so no random keys. The third
+                    // party's key goes into all four ed25519 slots. Slots must not be left empty:
+                    // an all-zero key decodes to a small-order point, and the counter-signature
+                    // check (verify_prehashed, not strict) would accept forged signatures for it.
+                    // The post-quantum slots are left empty (tag 0), which pq_checks skips; the
+                    // published test PQ key above is removed. So this image carries no PQ keys,
+                    // which is fine unless REQUIRE_PQ is set.
+                    for (i, dst) in header.sealed_data.pubkeys.iter_mut().enumerate() {
+                        dst.pk.copy_from_slice(derived_public_key.as_ref());
+                        dst.tag = [b't', b'p', b'k', b'0' + i as u8];
+                    }
+                    for dst in header.sealed_data.pubkeys_pq.iter_mut() {
+                        *dst = PubkeyPq::default();
+                    }
+                }
             }
 
             header._jal_instruction = generate_jal_x0(SIGBLOCK_LEN as isize)?;
