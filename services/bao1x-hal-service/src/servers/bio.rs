@@ -2,6 +2,16 @@ use bao1x_api::bio::*;
 use bao1x_api::bio_resources::*;
 use bao1x_hal::bio_hw;
 
+/// A DMA filter window is `bounds` pages starting at page `base` (4 KiB pages, as the
+/// BIO_BDMA SFR_FILTER_BASE/BOUNDS registers take them). Allowed only if it lies inside IFRAM0
+/// and IFRAM1.
+fn dma_window_allowed(base: u32, bounds: u32) -> bool {
+    let start = utralib::HW_IFRAM0_MEM as u64 >> 12;
+    let end = (utralib::HW_IFRAM1_MEM + utralib::HW_IFRAM1_MEM_LEN) as u64 >> 12;
+    let (base, bounds) = (base as u64, bounds as u64);
+    bounds > 0 && base >= start && base + bounds <= end
+}
+
 pub fn start_bio_service() {
     std::thread::spawn(move || {
         bio_service();
@@ -181,13 +191,27 @@ fn bio_service() {
             }
 
             BioOp::DmaWindows => {
+                let sender = msg_opt.as_ref().and_then(|m| m.sender.pid());
                 let buf = unsafe {
                     xous_ipc::Buffer::from_memory_message(
                         msg_opt.as_mut().unwrap().body.memory_message().unwrap(),
                     )
                 };
                 let windows = buf.to_original::<DmaFilterWindows, _>().unwrap();
-                bio_ss.setup_dma_windows(windows).unwrap();
+                // BIO DMA bypasses the MMU, and any process can send this. A window over SRAM
+                // or RRAM would let the BIO read or write other processes' memory, and app
+                // key slots (PartitionAccess::Open, so the RRAM controller doesn't check the
+                // reader). Only windows inside IFRAM are applied; any other window refuses
+                // the whole request.
+                if windows.windows.iter().flatten().all(|w| dma_window_allowed(w.base, w.bounds.get())) {
+                    bio_ss.setup_dma_windows(windows).unwrap();
+                } else {
+                    log::warn!(
+                        "BIO DMA windows refused for {:?}: only IFRAM is allowed ({:x?})",
+                        sender,
+                        windows
+                    );
+                }
             }
 
             BioOp::FifoEventTriggers => {
