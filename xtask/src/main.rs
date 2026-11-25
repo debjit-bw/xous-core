@@ -831,6 +831,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if env::args().filter(|x| x == "--thirdparty-test").count() != 0 {
                 builder.set_thirdparty_test(true);
             }
+            // a real third-party boot1: the collateral code (feature `thirdparty`), signed with
+            // third-party public keys and counter-signed with XOUS_THIRDPARTY_KEY
+            if env::args().filter(|x| x == "--thirdparty").count() != 0 {
+                builder.set_thirdparty_test(true);
+                builder.add_loader_feature("thirdparty");
+            }
         }
 
         Some("bao1x-alt-boot1") => {

@@ -297,7 +297,23 @@ pub fn sign_image<P: AsRef<Path>>(
             secbytes.copy_from_slice(&pkinfo.private_key[2..]);
             // Now we can use the private key data.
             let signing_key = SigningKey::from_bytes(&secbytes);
-            let testing_pem = pem::parse(TEST_KEY_PEM)?;
+            // The third-party key goes into public key slot 0 and makes the counter-signature.
+            // XOUS_THIRDPARTY_KEY names a real one (an ed25519 PKCS#8 PEM). Without it, the
+            // published test key is used, which protects nothing.
+            let testing_pem = match std::env::var("XOUS_THIRDPARTY_KEY") {
+                Ok(path) if !path.is_empty() => {
+                    if fake_pubkeys {
+                        println!("Third-party key: {}", path);
+                    }
+                    load_pem(&path)?
+                }
+                _ => {
+                    if fake_pubkeys {
+                        println!("WARNING: third-party key is the published TEST key (set XOUS_THIRDPARTY_KEY)");
+                    }
+                    pem::parse(TEST_KEY_PEM)?
+                }
+            };
 
             let anti_rollback = if let Some(code) = anti_rollback_manual {
                 code as u32
