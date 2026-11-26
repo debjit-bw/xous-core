@@ -183,6 +183,8 @@ pub(crate) struct Builder {
     board: String,
     detached_app_features: Vec<String>,
     git_describe: Option<String>,
+    /// dabao: path of a prebuilt service that runs as PID 3 in place of the keystore
+    trusted_service: Option<String>,
     git_rev: Option<String>,
     cargo_configs: Vec<String>,
     pq_key: String,
@@ -228,6 +230,7 @@ impl Builder {
             board: String::new(),
             detached_app_features: Vec::new(),
             git_describe: None,
+            trusted_service: None,
             git_rev: None,
             cargo_configs: Vec::new(),
             pq_key: "devkey/dev-pq.key".into(),
@@ -304,6 +307,23 @@ impl Builder {
     }
 
     pub fn thirdparty_test(&self) -> bool { self.thirdparty_test }
+
+    /// dabao only: run the prebuilt service `spec` ("name~flash:path") as PID 3, the process
+    /// that boot1 maps to the trusted coreuser, in place of the keystore. The keystore is then
+    /// left out of the image, so `spec` takes over everything the keystore did that the image
+    /// needs (on dabao: turning preemption on, and RRAM slot access).
+    pub fn set_trusted_service(&mut self, spec: &str) -> Result<&mut Builder, DynError> {
+        let mut spec: CrateSpec = spec.into();
+        let CrateSpec::BinaryFile(_, path, _) = &spec else {
+            return Err("--trusted-service takes a prebuilt binary, \"name~flash:path\"".into());
+        };
+        self.trusted_service = Some(path.clone());
+        spec.set_region(LoaderRegion::Flash);
+        self.services.push(spec);
+        Ok(self)
+    }
+
+    pub fn has_trusted_service(&self) -> bool { self.trusted_service.is_some() }
 
     pub fn set_antirollback_override(&mut self, value: usize) -> &mut Builder {
         self.arb_override = Some(value);
@@ -1227,6 +1247,20 @@ impl Builder {
             if self.board == "board-dabao" {
                 // apps live in the detached image on dabao
                 services_path.append(&mut Self::binary_files_of(&self.services));
+                // PIDs follow image order from 2: the trusted service goes right after the
+                // ticktimer, so it gets PID 3 (bao1x_hal::coreuser::TRUSTED_PID)
+                if let Some(trusted) = &self.trusted_service {
+                    let i = services_path.iter().position(|s| s == trusted).ok_or("trusted service missing")?;
+                    let s = services_path.remove(i);
+                    let first = Path::new(&services_path[0]).file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if first != "xous-ticktimer" {
+                        return Err(format!("expected xous-ticktimer as PID 2, found {first}").into());
+                    }
+                    services_path.insert(1, s);
+                    println!("PID 3 (trusted): {}", services_path[1]);
+                }
+            } else if self.trusted_service.is_some() {
+                return Err("--trusted-service is only supported for dabao".into());
             } else {
                 services_path.append(&mut self.enumerate_binary_files()?);
             }

@@ -201,6 +201,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder.add_apps(&extra_apps);
     let extra_services = get_flag("--service")?;
     builder.add_services(&extra_services);
+    let trusted_services = get_flag("--trusted-service")?;
+    match &trusted_services[..] {
+        [] => {}
+        [spec] => {
+            builder.set_trusted_service(spec)?;
+        }
+        _ => return Err("only one --trusted-service".into()),
+    }
     // extract features, and especially track language features
     let features = get_flag("--feature")?;
 
@@ -1006,9 +1014,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             builder.set_sigblock_size(sigblock_size);
 
             // minimal set of services for app development on a dabao. Need to save space for the app itself!
-            let bao_rram_pkgs =
+            let mut bao_rram_pkgs =
                 ["xous-ticktimer", "keystore", "xous-log", "xous-names", "usb-bao1x", "bao1x-hal-service"]
                     .to_vec();
+            if builder.has_trusted_service() {
+                // the trusted service takes the keystore's place as PID 3 (see Builder::build)
+                bao_rram_pkgs.retain(|p| *p != "keystore");
+            }
             let bao_app_pkgs: Vec<&'static str> = [].to_vec();
 
             builder.add_loader_feature("debug-print");
@@ -1158,6 +1170,8 @@ The [cratespecs] list is treated as apps or services based on the context of [ve
 be merged in with explicit app/service treatment with the following flags:
  [--app] [cratespec]     [cratespec] is treated as an additional app
  [--service] [cratespec] [cratespec] is treated as an additional service
+ [--trusted-service] [name~flash:path]  dabao only: this prebuilt service runs as PID 3 (the trusted
+                          coreuser) and the keystore is left out of the image
 
 [--lkey] and [--kkey]    Paths to alternate private key files for loader and kernel key signing (defaults to developer key)
 [--no-timestamp]         Do not include a timestamp in the build. By default, `ticktimer` is rebuilt on every run to encode a timestamp.
